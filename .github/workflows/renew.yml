@@ -86,5 +86,4 @@ jobs:
             *.png
             screenshots/
             singbox.log
-            config.json
           if-no-files-found: ignore
