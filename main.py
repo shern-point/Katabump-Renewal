@@ -241,6 +241,69 @@ def _xdotool_click(x: int, y: int):
     except Exception:
         os.system(f"xdotool mousemove {x} {y} click 1 2>/dev/null")
 
+def _get_proxy_rotation():
+    """Read the actual selectable nodes from the generated sing-box config."""
+    try:
+        with open("config.json", encoding="utf-8") as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        print(f"⚠️ 无法读取代理轮换配置: {e}")
+        return None
+
+    outbounds = config.get("outbounds", [])
+    selector = next((ob for ob in outbounds
+                     if ob.get("tag") == "proxy" and ob.get("type") == "selector"), None)
+    if selector is None:
+        return None
+    real_nodes = {ob.get("tag") for ob in outbounds if ob.get("server")
+                  and ob.get("type") not in ("direct", "block", "dns", "urltest", "selector")}
+    nodes = list(dict.fromkeys(tag for tag in selector.get("outbounds", []) if tag in real_nodes))
+    if len(nodes) < 2:
+        return None
+    controller = config.get("experimental", {}).get("clash_api", {}).get("external_controller")
+    if not controller:
+        raise ValueError("多节点代理缺少控制接口，请重新运行 proxy_handler.py 生成 config.json")
+    return {"nodes": nodes, "api_url": f"http://{controller}", "current_node": None}
+
+
+def _select_proxy_node(rotation, advance=False):
+    """Pin the initial automatic choice, then rotate from the last selected node."""
+    nodes = rotation["nodes"]
+    current = rotation["current_node"]
+    advance = advance and current is not None
+    try:
+        with requests.Session() as session:
+            # The local controller must not inherit HTTP_PROXY / HTTPS_PROXY.
+            session.trust_env = False
+            if current is None:
+                response = session.get(f"{rotation['api_url']}/proxies/proxy", timeout=5)
+                response.raise_for_status()
+                current = response.json().get("now")
+                if current == "auto":
+                    response = session.get(f"{rotation['api_url']}/proxies/auto", timeout=5)
+                    response.raise_for_status()
+                    current = response.json().get("now")
+            if current not in nodes:
+                raise ValueError("无法确定当前代理节点")
+            selected = nodes[(nodes.index(current) + 1) % len(nodes)] if advance else current
+            response = session.put(
+                f"{rotation['api_url']}/proxies/proxy", json={"name": selected}, timeout=5,
+            )
+            response.raise_for_status()
+        # Only advance after a confirmed switch; failed requests retry the same node.
+        rotation["current_node"] = selected
+        if advance:
+            print(f"🔄 切换代理节点: {current} -> {selected}")
+        else:
+            print(f"🔗 固定本次续期代理节点: {selected}")
+        return True
+    except (requests.RequestException, ValueError, AttributeError) as e:
+        print(f"❌ 代理节点选择失败，本次不启动账号浏览器: {e}")
+        return False
+
+
 def _restart_proxy():
     if not os.path.exists("sing-box"):
         print("  （本环境无 sing-box 可执行文件，跳过代理节点切换）")
@@ -645,6 +708,7 @@ def _run_account(sb_kwargs, email, pwd) -> bool:
         return False
 
 def main():
+    global CURRENT_EMAIL
     print("#" * 25)
     print("   katabump 自动登录续期")
     print("#" * 25)
@@ -687,6 +751,9 @@ def main():
         sb_kwargs["proxy"] = proxy_str
     else:
         print("🌐 未使用代理，直连访问")
+    rotation = _get_proxy_rotation() if IS_PROXY else None
+    if rotation:
+        print(f"🔄 已启用 {len(rotation['nodes'])} 个代理节点轮换")
     ok_count = 0
     max_attempts = int(os.environ.get("NODE_ATTEMPTS", "3"))
     for idx, acc in enumerate(pending_accounts, 1):
@@ -695,10 +762,14 @@ def main():
         print("\n" + "=" * 25)
         print(f"  处理账号 {idx}/{len(pending_accounts)}: {email}")
         print("=" * 25)
+        CURRENT_EMAIL = email
         acc_ok = False
         for attempt in range(1, max_attempts + 1):
             print(f"  ── 节点尝试 {attempt}/{max_attempts} ──")
-            if attempt > 1:
+            if rotation:
+                if not _select_proxy_node(rotation, advance=(idx > 1 or attempt > 1)):
+                    continue
+            elif attempt > 1:
                 _restart_proxy()
             if _run_account(sb_kwargs, email, pwd):
                 acc_ok = True
@@ -707,7 +778,7 @@ def main():
             ok_count += 1
         else:
             print(f"❌ 账号 {email} 所有节点尝试均失败")
-            send_tg_message("❌", "节点尝试均失败", f"{max_attempts} 次不同代理节点")
+            send_tg_message("❌", "节点尝试均失败", f"共尝试 {max_attempts} 次")
     print("\n" + "#" * 25)
     print(f"  全部账号处理完毕: {ok_count}/{len(pending_accounts)} 成功，"
           f"{skipped_count} 个未到期跳过，{invalid_count} 个日期配置错误")

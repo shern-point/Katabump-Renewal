@@ -347,13 +347,23 @@ def _build_pool_outbounds(base_out, pool_nodes):
             ob["tls"]["server_name"] = node["sni"]
         outbounds.append(ob)
 
+    node_tags = [ob["tag"] for ob in outbounds]
     outbounds.append(
         {
             "type": "urltest",
-            "tag": "proxy",
-            "outbounds": [f"node-{i}" for i in range(1, len(pool_nodes) + 1)],
+            "tag": "auto",
+            "outbounds": node_tags,
             "url": "https://www.gstatic.com/generate_204",
             "interval": "30s",
+        }
+    )
+    outbounds.append(
+        {
+            "type": "selector",
+            "tag": "proxy",
+            "outbounds": ["auto", *node_tags],
+            "default": "auto",
+            "interrupt_exist_connections": True,
         }
     )
     outbounds.append({"type": "direct", "tag": "direct"})
@@ -394,15 +404,17 @@ def main():
             sys.exit(1)
 
     # If the base proxy is anytls and a pool.json exists, expand into
-    # multiple node outbounds + a urltest group (auto-pick a reachable node).
+    # node outbounds, an automatic initial choice, and a controllable selector.
     outbounds = [outbound, {"type": "direct", "tag": "direct"}]
+    pool_mode = False
     if scheme == "anytls":
         pool = _load_pool()
         if pool:
             node_obs = _build_pool_outbounds(outbound, pool)
             if node_obs:
                 outbounds = node_obs
-                print(f"  Pool mode: {len(pool)} nodes + urltest")
+                pool_mode = True
+                print(f"  Pool mode: {len(pool)} nodes + urltest + selector")
 
     config = {
         "log": {"level": "info", "timestamp": True},
@@ -418,6 +430,10 @@ def main():
         # Without this, curl through the HTTP inbound has no outbound to use.
         "route": {"final": "proxy"},
     }
+    if pool_mode:
+        config["experimental"] = {
+            "clash_api": {"external_controller": "127.0.0.1:9090"},
+        }
 
     with open("config.json", "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)

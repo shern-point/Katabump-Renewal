@@ -48,15 +48,21 @@
 ### 2.2 可选变量
 
 - `PROXY_URL`：代理节点分享链接；配置后工作流会启动 sing-box，并通过 `http://127.0.0.1:8080` 出站
-- `格式示例:
-- `vmess：vmess://base64EncodedJSON
-- `vless：vless://uuid@host:port?security=tls&type=ws&...#name
-- `hy2：hy2://password@host:port?sni=xxx
-- `sock5：socks5://user:pass@host:port
-- 
 - `TG_BOT_TOKEN`：Telegram Bot Token（通知可选）
 - `TG_CHAT_ID`：Telegram Chat ID（通知可选）
-- `NODE_ATTEMPTS`：每个账号的最大节点重试次数，默认 `3`
+- `NODE_ATTEMPTS`：每个账号的最大尝试总次数（包含首次），默认 `3`
+
+代理链接格式示例：
+
+- `vmess://base64EncodedJSON`
+- `vless://uuid@host:port?security=tls&type=ws&...#name`
+- `hy2://password@host:port?sni=xxx`
+- `socks5://user:pass@host:port`
+- `anytls://password@host:port?sni=xxx&fp=chrome`
+
+使用 `anytls://` 链接并配置 `pool.json`（或通过 `POOL_FILE` 指定节点池文件）时，sing-box 启动后先自动选择可用节点，开始续期时固定当前节点。当天有多个账号实际执行续期且池中有多个节点时，处理下一个账号前按节点顺序切换代理，用完后循环；未到续期日而跳过的账号不消耗节点。单节点或直连时不进行账号间轮换。
+
+Cloudflare 验证或登录失败时，仍会在该账号下一次尝试前切换代理，最多尝试 `NODE_ATTEMPTS` 次；后续账号从上一个账号最后使用的节点继续轮换。节点切换通过仅监听 `127.0.0.1:9090` 的本地控制接口完成。
 
 ### 2.3 工作流内部变量（无需手动配置）
 
@@ -153,6 +159,8 @@ python3 /home/runner/work/Katabump-Renewal/Katabump-Renewal/main.py
 export PROXY_URL='你的代理链接'
 python3 /home/runner/work/Katabump-Renewal/Katabump-Renewal/proxy_handler.py
 ```
+
+本地已有 `config.json` 时，需要重新运行 `proxy_handler.py` 生成配置，并让 sing-box 加载新配置，才能使用多节点轮换。GitHub Actions 每次运行都会自动重新生成配置。
 
 ---
 

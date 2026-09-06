@@ -130,6 +130,7 @@ class AccountSchedulingTests(unittest.TestCase):
         self.clock.now.return_value = datetime(2026, 9, 6, 12, tzinfo=main.RENEWAL_TIMEZONE)
         self.run_account = stack.enter_context(patch.object(main, "_run_account", return_value=True))
         self.restart_proxy = stack.enter_context(patch.object(main, "_restart_proxy"))
+        self.proxy_rotation = stack.enter_context(patch.object(main, "_get_proxy_rotation", return_value=None))
         self.notify = stack.enter_context(patch.object(main, "send_tg_message"))
 
     @staticmethod
@@ -144,6 +145,7 @@ class AccountSchedulingTests(unittest.TestCase):
         main.main()
         self.run_account.assert_not_called()
         self.restart_proxy.assert_not_called()
+        self.proxy_rotation.assert_not_called()
         self.notify.assert_not_called()
 
     def test_mixed_accounts_only_run_due_and_unconfigured_accounts(self):
