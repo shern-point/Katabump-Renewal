@@ -18,19 +18,30 @@
 #### 方式 A：`USERS_JSON`（推荐，多账号）
 
 - 变量名：`USERS_JSON`
-- 类型：JSON 字符串数组
-- 支持字段：`username` 或 `email`，以及 `password`
+- 类型：JSON 字符串，内容为账号对象数组
+- 支持字段：`username` 或 `email`、`password`，以及可选的续期基准日期 `renewal_date`
 
 示例：
 
 ```json
-[{"username": "your_email@example.com", "password": "your_password"}, {"username": "another@example.com", "password": "pwd"}]
+[
+  {"username": "your_email@example.com", "password": "your_password", "renewal_date": "2026-09-02"},
+  {"username": "another@example.com", "password": "pwd", "renewal_date": "2026-09-03"}
+]
 ```
+
+`renewal_date` 填写某一次续期的日期，格式为 `YYYY-MM-DD`，具体执行时刻由工作流的定时设置决定。每个账号独立以该日期为基准，每隔 **4 天**执行一次：基准日当天及之后第 4、8、12… 天为续期日。例如 `2026-09-02` 对应 `09-02`、`09-06`、`09-10`、`09-14`…，其他日期直接跳过该账号。
+
+- 日期按 **UTC+8（北京时间 / 台北时间）**计算，不受运行机器的时区影响；未来的基准日期会等待到当天再执行。
+- 判断发生在启动浏览器和登录之前；跳过的账号不会访问 Katabump 或触发其 Cloudflare 验证，日志会显示下次续期日期。
+- 不填写、填空字符串或 `null` 时保留原有行为，每次运行都尝试续期；填写无效日期时跳过该账号并报告配置错误，其他账号继续处理。
+- 这是按日历日期计算的固定周期，无需每次修改基准日期，也不会自动更新该字段；同一天多次运行都会执行到期账号。错过某个续期日后不会自动补跑，可手动续期后按实际日期调整基准日。
 
 #### 方式 B：单账号
 
 - `KATABUMP_EMAIL`
 - `KATABUMP_PASSWORD`
+- `KATABUMP_RENEWAL_DATE`（可选）：格式与规则同 `renewal_date`
 
 > 脚本会优先读取 `USERS_JSON`；若未配置，再回退到 `KATABUMP_EMAIL` / `KATABUMP_PASSWORD`。
 
@@ -75,6 +86,7 @@
      - `TG_BOT_TOKEN`
      - `TG_CHAT_ID`
      - `NODE_ATTEMPTS`（不填默认 3）
+     - `KATABUMP_RENEWAL_DATE`（单账号模式的续期基准日期，可选）
 
 ### 步骤 3：手动首次运行
 
@@ -82,9 +94,12 @@
 2. 选择工作流：`Katabump Auto Renew`。
 3. 点击 `Run workflow` 执行一次，检查日志是否正常。
 
+手动运行同样遵循各账号的续期日期；当天没有到期账号时会正常跳过。
+
 ### 步骤 4：定时运行
 
 - 当前默认定时：每天 UTC `00:00`（北京时间 `08:00`）。
+- 工作流每天检查各账号的日期，只登录当天需要续期的账号；各账号可以配置不同的基准日期。
 - 如需调整，编辑文件：
   `/home/runner/work/Katabump-Renewal/Katabump-Renewal/.github/workflows/renew.yml`
   中的 `cron` 表达式。
@@ -119,7 +134,7 @@ seleniumbase install chromedriver
 #### 多账号示例
 
 ```bash
-export USERS_JSON='[{"username":"user@example.com","password":"your_password"}]'
+export USERS_JSON='[{"username":"user@example.com","password":"your_password","renewal_date":"2026-09-02"}]'
 python3 /home/runner/work/Katabump-Renewal/Katabump-Renewal/main.py
 ```
 
@@ -128,6 +143,7 @@ python3 /home/runner/work/Katabump-Renewal/Katabump-Renewal/main.py
 ```bash
 export KATABUMP_EMAIL='user@example.com'
 export KATABUMP_PASSWORD='your_password'
+export KATABUMP_RENEWAL_DATE='2026-09-02'  # 可选
 python3 /home/runner/work/Katabump-Renewal/Katabump-Renewal/main.py
 ```
 

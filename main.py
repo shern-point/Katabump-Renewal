@@ -5,13 +5,15 @@ import os
 import json
 import time
 import subprocess
+from datetime import date, datetime, timedelta, timezone
 import requests
-from seleniumbase import SB
 
 TG_CHAT_ID   = os.environ.get("TG_CHAT_ID") or ""
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
 
 BASE_URL = "https://dashboard.katabump.com"
+RENEWAL_INTERVAL_DAYS = 4
+RENEWAL_TIMEZONE = timezone(timedelta(hours=8))
 
 def load_accounts():
     raw = os.environ.get("USERS_JSON", "")
@@ -19,7 +21,11 @@ def load_accounts():
         email = os.environ.get("KATABUMP_EMAIL", "")
         pwd   = os.environ.get("KATABUMP_PASSWORD", "")
         if email:
-            return [{"email": email, "password": pwd}]
+            return [{
+                "email": email,
+                "password": pwd,
+                "renewal_date": os.environ.get("KATABUMP_RENEWAL_DATE", ""),
+            }]
         print("❌ 未配置 USERS_JSON 或 KATABUMP_EMAIL/KATABUMP_PASSWORD")
         return []
     try:
@@ -29,11 +35,38 @@ def load_accounts():
             accounts.append({
                 "email": u.get("username") or u.get("email") or "",
                 "password": u.get("password") or "",
+                "renewal_date": u.get("renewal_date"),
             })
         return [a for a in accounts if a["email"]]
     except Exception as e:
         print(f"❌ USERS_JSON 解析失败: {e}")
         return []
+
+
+def get_next_renewal_date(renewal_date, today=None):
+    """返回不早于今天的最近续期日；未配置日期时返回 None。"""
+    if renewal_date is None:
+        return None
+    error_message = "renewal_date 必须是 YYYY-MM-DD 格式的有效日期"
+    if not isinstance(renewal_date, str):
+        raise ValueError(error_message)
+    value = renewal_date.strip()
+    if not value:
+        return None
+    try:
+        anchor = date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(error_message) from None
+    if anchor.isoformat() != value:
+        raise ValueError(error_message)
+    if today is None:
+        today = datetime.now(RENEWAL_TIMEZONE).date()
+    elapsed_days = (today - anchor).days
+    if elapsed_days <= 0:
+        return anchor
+    periods = (elapsed_days + RENEWAL_INTERVAL_DAYS - 1) // RENEWAL_INTERVAL_DAYS
+    return anchor + timedelta(days=periods * RENEWAL_INTERVAL_DAYS)
+
 
 ACCOUNTS = load_accounts()
 CURRENT_EMAIL = ""
@@ -591,6 +624,8 @@ def _run_account(sb_kwargs, email, pwd) -> bool:
     CURRENT_EMAIL = email
     print("🚀 启动浏览器...")
     try:
+        from seleniumbase import SB
+
         with SB(**sb_kwargs) as sb:
             try:
                 sb.open("https://api.ip.sb/ip")
@@ -616,6 +651,34 @@ def main():
     if not ACCOUNTS:
         print("❌ 没有可用的账号，退出。")
         raise SystemExit(1)
+    today = datetime.now(RENEWAL_TIMEZONE).date()
+    print(f"📅 今天: {today.isoformat()}（UTC+8），续期周期: {RENEWAL_INTERVAL_DAYS} 天")
+    pending_accounts = []
+    skipped_count = 0
+    invalid_count = 0
+    for acc in ACCOUNTS:
+        try:
+            next_date = get_next_renewal_date(acc.get("renewal_date"), today)
+        except ValueError as e:
+            invalid_count += 1
+            print(f"❌ 账号 {acc['email']} 日期配置错误，跳过登录: {e}")
+            continue
+        if next_date is not None and next_date > today:
+            skipped_count += 1
+            print(f"⏭️ 账号 {acc['email']} 今天无需续期，跳过登录；下次续期: {next_date.isoformat()}")
+            continue
+        pending_accounts.append(acc)
+        if next_date is None:
+            print(f"ℹ️ 账号 {acc['email']} 未配置 renewal_date，按原流程执行")
+        else:
+            print(f"✅ 账号 {acc['email']} 今天是续期日")
+    print(f"👥 共 {len(ACCOUNTS)} 个账号，本次执行 {len(pending_accounts)} 个，"
+          f"未到期跳过 {skipped_count} 个，日期配置错误 {invalid_count} 个")
+    if not pending_accounts:
+        print("ℹ️ 本次没有可执行的账号，跳过浏览器启动。")
+        if invalid_count:
+            raise SystemExit(1)
+        return
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
     proxy_str = os.environ.get("PROXY_SERVER", "").strip() or "http://127.0.0.1:8080"
     sb_kwargs = {"uc": True, "headless": False}
@@ -624,14 +687,13 @@ def main():
         sb_kwargs["proxy"] = proxy_str
     else:
         print("🌐 未使用代理，直连访问")
-    print(f"👥 共 {len(ACCOUNTS)} 个账号待处理")
     ok_count = 0
     max_attempts = int(os.environ.get("NODE_ATTEMPTS", "3"))
-    for idx, acc in enumerate(ACCOUNTS, 1):
+    for idx, acc in enumerate(pending_accounts, 1):
         email = acc["email"]
         pwd   = acc["password"]
         print("\n" + "=" * 25)
-        print(f"  处理账号 {idx}/{len(ACCOUNTS)}: {email}")
+        print(f"  处理账号 {idx}/{len(pending_accounts)}: {email}")
         print("=" * 25)
         acc_ok = False
         for attempt in range(1, max_attempts + 1):
@@ -647,9 +709,10 @@ def main():
             print(f"❌ 账号 {email} 所有节点尝试均失败")
             send_tg_message("❌", "节点尝试均失败", f"{max_attempts} 次不同代理节点")
     print("\n" + "#" * 25)
-    print(f"  全部账号处理完毕: {ok_count}/{len(ACCOUNTS)} 成功")
+    print(f"  全部账号处理完毕: {ok_count}/{len(pending_accounts)} 成功，"
+          f"{skipped_count} 个未到期跳过，{invalid_count} 个日期配置错误")
     print("#" * 25)
-    if ok_count < len(ACCOUNTS):
+    if ok_count < len(pending_accounts) or invalid_count:
         raise SystemExit(1)
 
 if __name__ == "__main__":
